@@ -127,6 +127,13 @@ function love.load(args)
     flags.fullscreen = true
     love.window.setMode(100, 100, flags)
 
+    if not nativefs.getInfo("save") then
+        nativefs.createDirectory("save")
+    end
+
+    if not nativefs.getInfo("save/dat") then
+        nativefs.write("save/dat", "")
+    end
     local contents = nativefs.read("save/dat")
 
     if contents ~= "" and args[1] ~= "-ns" then
