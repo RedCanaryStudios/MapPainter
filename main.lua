@@ -1,6 +1,8 @@
 local binser = require("deps.binser")
 local nativefs = require("deps.nativefs")
+local ffi = require("ffi")
 local imgui
+local hover = false
 
 local canvas
 
@@ -159,10 +161,6 @@ function love.update(dt)
     brush.size = math.max(brush.size + dt*(50/camera.zoom)*(isDown("q") and -1 or 0), 1)
     brush.size = math.max(brush.size + dt*(50/camera.zoom)*(isDown("e") and 1 or 0), 1)
 
-    brush.color[1] = (brush.color[1] + dt*0.6*(isDown("r") and 1 or 0)) % 1
-    brush.color[2] = (brush.color[2] + dt*0.6*(isDown("g") and 1 or 0)) % 1
-    brush.color[3] = (brush.color[3] + dt*0.6*(isDown("b") and 1 or 0)) % 1
-
     local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
@@ -214,9 +212,12 @@ local function doGraphics()
     love.graphics.setColor(77/255, 140/255, 50/255)
     love.graphics.rectangle("fill", ox, oy, overlay:getWidth(), overlay:getHeight())
 
-    love.graphics.setColor(unpack(brush.color))
     local mx, my = getMouseLocal()
-    love.graphics.circle("fill", mx, my, brush.size)
+
+    if not hover then
+        love.graphics.setColor(unpack(brush.color))
+        love.graphics.circle("fill", mx, my, brush.size)
+    end
 
     love.graphics.setColor(1, 1, 1)
     love.graphics.draw(canvas, ox, oy, 0, 1/debug.scale, 1/debug.scale)
@@ -225,19 +226,54 @@ local function doGraphics()
 
     love.graphics.pop()
 
-    if love.mouse.isDown(1) then
+    if love.mouse.isDown(1) and not hover then
         canvas:renderTo(function()
             love.graphics.setColor(unpack(brush.color))
             love.graphics.circle("fill", (mx % overlay:getWidth())*debug.scale, my*debug.scale, brush.size*debug.scale)
         end)
     end
 
-    love.graphics.setColor(unpack(brush.color))
-    local mx, my = getMouseGlobal()
-    love.graphics.circle("line", mx, my, brush.size*camera.zoom)
+    if not hover then
+        love.graphics.setColor(unpack(brush.color))
+        local mx, my = getMouseGlobal()
+        love.graphics.circle("line", mx, my, brush.size*camera.zoom)
+    end
 end
 
 function love.draw()
+    hover = false
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 280))
+    if imgui.Begin("Edit", nil, imgui.ImGuiWindowFlags_MenuBar) then
+        hover = imgui.IsWindowHovered() or hover
+        hover = imgui.IsWindowFocused() or hover
+
+        local red = ffi.new("float[1]",brush.color[1])
+        local green = ffi.new("float[1]",brush.color[2])
+        local blue = ffi.new("float[1]",brush.color[3])
+        if imgui.BeginMenuBar("Config") then
+
+            if imgui.BeginMenu("Colors") then
+                imgui.SliderFloat("RED", red, 0, 1)
+                brush.color[1] = red[0]
+
+                imgui.SliderFloat("green", green, 0, 1)
+                brush.color[2] = green[0]
+
+                imgui.SliderFloat("BLUE", blue, 0, 1)
+                brush.color[3] = blue[0]
+
+                hover = imgui.IsAnyItemHovered() or hover
+                hover = imgui.IsAnyItemFocused() or hover
+                hover = imgui.IsAnyMouseDown() or hover
+                imgui.EndMenu()
+            end
+
+
+            imgui.EndMenuBar()
+        end
+    end
+    imgui.End()
+
     local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
@@ -253,8 +289,6 @@ function love.draw()
 
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(fps)
-    
-    imgui.ShowDemoWindow()
 
     imgui.Render()
     imgui.RenderDrawLists()
@@ -281,6 +315,7 @@ function love.keypressed(k)
         local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
         brush.color = {canvas:newImageData():getPixel(dx + camera.offset[1] + love.mouse.getX()/camera.zoom, dy + camera.offset[2] + love.mouse.getY()/camera.zoom)}
+        brush.color[4] = 1
     end
 
     imgui.KeyPressed(k)
