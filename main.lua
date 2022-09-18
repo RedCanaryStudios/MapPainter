@@ -1,21 +1,34 @@
 local binser = require("deps.binser")
 local nativefs = require("deps.nativefs")
 local ffi = require("ffi")
+
 local imgui
 local hover = false
+local hoverdb = 0
 
 local canvas
+local clock = 0
+local registerDrawClick = 0
 
 local fps = 0
 local fpslast = 0
 
 local debug = {
     scale = 3;
+    hoverdb = 0.22;
+    print = function()
+        return fps
+    end
 }
 
+local function isUI()
+    return (clock - hoverdb < debug.hoverdb)
+end
+
 local brush = {
-    color = {0, 0, 0, 1};
+    color = {1, 1, 1, 1};
     size = 20;
+    structsize = 10;
 }
 
 local camera = {
@@ -24,15 +37,50 @@ local camera = {
     zoom = 1;
 }
 
-local clock = 0
+local items = {
+    stationary = {};
+    moveable = {};
+    pending = nil;
+}
+
+local function starPoints(a, r, ox, oy)
+    local vertices = {}
+
+    for i = 0, (2*a)+1 do
+        table.insert(vertices, (r/(((i + 1) % 2)+1))*math.sin(i/(2*a)*2*math.pi) + ox)
+        table.insert(vertices, (r/(((i + 1) % 2)+1))*math.cos(i/(2*a)*2*math.pi) + oy)
+    end
+
+    return vertices
+end
+
+local stationaryTemplates = {
+    City = {
+        Render = function(mydat, ofx, ofy)
+            love.graphics.setColor(unpack(mydat.color))
+            love.graphics.polygon("fill", starPoints(3, mydat.size, mydat.x + ofx, mydat.y + ofy))
+        end;
+    };
+
+    Capital = {
+        Render = function(mydat, ofx, ofy)
+            love.graphics.setColor(unpack(mydat.color))
+            love.graphics.polygon("fill", starPoints(5, mydat.size, mydat.x + ofx, mydat.y + ofy))
+        end;
+    };
+
+    Dock = {
+        Render = function(mydat, ofx, ofy)
+            love.graphics.setColor(unpack(mydat.color))
+            love.graphics.polygon("fill", starPoints(4, mydat.size, mydat.x + ofx, mydat.y + ofy))
+        end;
+    };
+}
+
+local stationaryMoveable = {}
 
 local overlay = love.graphics.newImage("resources/map.png")
 local canvas = love.graphics.newCanvas(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
-
-local function hex2rgb(hex)
-    hex = hex:gsub("#","")
-    return tonumber("0x"..hex:sub(1,2)), tonumber("0x"..hex:sub(3,4)), tonumber("0x"..hex:sub(5,6))
-end
 
 local function getMouseGlobal()
     return love.mouse.getX(), love.mouse.getY()
@@ -60,24 +108,28 @@ local function shallowcopy(orig)
     return copy
 end
 
+local function savedata()
+    local imgdata = canvas:newImageData():getString()
+    nativefs.write("save/dat", binser.serialize(items, brush, camera, imgdata))
+end
+
 function love.run()
 	if love.load then love.load(love.arg.parseGameArguments(arg), arg) end
 
-	-- We don't want the first frame's dt to include time taken by love.load.
+	
 	if love.timer then love.timer.step() end
 
 	local dt = 0
 
-	-- Main loop time.
+	
 	return function()
-		-- Process events.
+		
 		if love.event then
 			love.event.pump()
 			for name, a,b,c,d,e,f in love.event.poll() do
 				if name == "quit" then
 					if not love.quit or not love.quit() then
-                        local imgdata = canvas:newImageData():getString()
-                        nativefs.write("save/dat", binser.serialize(brush, camera, imgdata))
+                        savedata()
 						return a or 0
 					end
 				end
@@ -85,11 +137,9 @@ function love.run()
 			end
 		end
 
-		-- Update dt, as we'll be passing it to update
 		if love.timer then dt = love.timer.step() end
 
-		-- Call update and draw
-		if love.update then love.update(dt) end -- will pass 0 if love.timer is disabled
+		if love.update then love.update(dt) end
 
 		if love.graphics and love.graphics.isActive() then
 			love.graphics.origin()
@@ -121,6 +171,9 @@ function love.load(args)
 
     imgui = require "cimgui"
     imgui.Init()
+    imgui.GetStyle().WindowRounding = 5
+    imgui.GetStyle().FrameRounding = 4
+    imgui.GetStyle().GrabRounding = 4;
 
     local flags = {}
     flags.fullscreentype = "desktop"
@@ -136,8 +189,13 @@ function love.load(args)
     end
     local contents = nativefs.read("save/dat")
 
+    canvas:renderTo(function()
+        love.graphics.setColor(77/255, 140/255, 50/255)
+        love.graphics.rectangle("fill", 0, 0, overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
+    end)
+
     if contents ~= "" and args[1] ~= "-ns" then
-        brush, camera, imgdata = binser.deserializeN(contents, 3)
+        items, brush, camera, imgdata = binser.deserializeN(contents, 4)
         local loaded = love.image.newImageData(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale, "rgba8", imgdata)
         canvas:renderTo(function()
             local img = love.graphics.newImage(loaded)
@@ -216,12 +274,9 @@ local function doGraphics()
     love.graphics.stencil(SF, "replace", 1)
     love.graphics.setStencilTest("greater", 0)
 
-    love.graphics.setColor(77/255, 140/255, 50/255)
-    love.graphics.rectangle("fill", ox, oy, overlay:getWidth(), overlay:getHeight())
-
     local mx, my = getMouseLocal()
 
-    if not hover then
+    if not isUI() then
         love.graphics.setColor(unpack(brush.color))
         love.graphics.circle("fill", mx, my, brush.size)
     end
@@ -231,16 +286,49 @@ local function doGraphics()
 
     love.graphics.setStencilTest()
 
+    for _, v in ipairs(items.stationary) do
+        stationaryTemplates[v.type].Render(v, ox, oy)
+    end
+
+    if items.pending and registerDrawClick > 0 then
+        registerDrawClick = registerDrawClick - 1
+        hoverdb = clock
+
+        local dat = {
+            type = items.pending;
+            size = brush.structsize;
+            x = mx;
+            y = my;
+            color = shallowcopy(brush.color)
+        }
+        
+        table.insert(items.stationary, dat)
+
+        if not love.keyboard.isDown("lctrl") then
+            items.pending = nil
+        end
+     end
+
+    if items.pending then
+        local fakeDat = {
+            size = brush.structsize;
+            x = mx;
+            y = my;
+            color = brush.color;
+        }
+        stationaryTemplates[items.pending].Render(fakeDat, 0, 0)
+    end
+
     love.graphics.pop()
 
-    if love.mouse.isDown(1) and not hover then
+    if love.mouse.isDown(1) and not isUI() and not items.pending then
         canvas:renderTo(function()
             love.graphics.setColor(unpack(brush.color))
             love.graphics.circle("fill", (mx % overlay:getWidth())*debug.scale, my*debug.scale, brush.size*debug.scale)
         end)
     end
 
-    if not hover then
+    if not isUI() and not items.pending then
         love.graphics.setColor(unpack(brush.color))
         local mx, my = getMouseGlobal()
         love.graphics.circle("line", mx, my, brush.size*camera.zoom)
@@ -249,36 +337,71 @@ end
 
 function love.draw()
     hover = false
-    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 280))
-    if imgui.Begin("Edit", nil, imgui.ImGuiWindowFlags_MenuBar) then
-        hover = imgui.IsWindowHovered() or hover
-        hover = imgui.IsWindowFocused() or hover
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 120))
 
+    if imgui.Begin("PaintBrush") then
         local red = ffi.new("float[1]",brush.color[1])
         local green = ffi.new("float[1]",brush.color[2])
         local blue = ffi.new("float[1]",brush.color[3])
-        if imgui.BeginMenuBar("Config") then
 
-            if imgui.BeginMenu("Colors") then
-                imgui.SliderFloat("RED", red, 0, 1)
-                brush.color[1] = red[0]
+        imgui.SliderFloat("RED", red, 0, 1)
+        brush.color[1] = red[0]
 
-                imgui.SliderFloat("green", green, 0, 1)
-                brush.color[2] = green[0]
+        imgui.SliderFloat("GREEN", green, 0, 1)
+        brush.color[2] = green[0]
 
-                imgui.SliderFloat("BLUE", blue, 0, 1)
-                brush.color[3] = blue[0]
+        imgui.SliderFloat("BLUE", blue, 0, 1)
+        brush.color[3] = blue[0]
+    end
 
-                hover = imgui.IsAnyItemHovered() or hover
-                hover = imgui.IsAnyItemFocused() or hover
-                hover = imgui.IsAnyMouseDown() or hover
-                imgui.EndMenu()
+    imgui.End()
+
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 750))
+
+    if imgui.Begin("Placement") then
+        if imgui.TreeNode_Str("Structures") then
+            local scale = ffi.new("float[1]", brush.structsize)
+
+            for k in pairs(stationaryTemplates) do
+                if imgui.Button("Place "..k) then
+                    if items.pending == k then
+                        items.pending = nil
+                    else
+                        items.pending = k
+                    end
+                end
             end
 
+            imgui.Spacing()
 
-            imgui.EndMenuBar()
+            imgui.SliderFloat("Size", scale, 2, 20)
+            brush.structsize = scale[0]
+
+            imgui.TreePop()
         end
+
+        if imgui.TreeNode_Str("Units") then
+            if imgui.Button("Army") then
+
+            end
+
+            if imgui.Button("Heavy Army") then
+
+            end
+
+            if imgui.Button("Boat") then
+
+            end
+            imgui.TreePop()
+        end
+
+        imgui.Spacing()
+
+        local db = ffi.new("float[1]", debug.hoverdb)
+        imgui.SliderFloat("Debounce", db, 0.05, 1)
+        debug.hoverdb = db[0]
     end
+
     imgui.End()
 
     local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
@@ -294,11 +417,19 @@ function love.draw()
         doGraphics()
     end
 
-    love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.print(fps)
+    if debug.print then
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.print(debug.print())
+    end
 
     imgui.Render()
     imgui.RenderDrawLists()
+
+    hover = imgui.GetWantCaptureMouse()
+
+    if hover == true then
+        hoverdb = clock
+    end
 end
 
 function love.wheelmoved(x, y)
@@ -318,16 +449,25 @@ function love.keypressed(k)
     if k == 'escape' then
         love.event.quit()
     elseif k == 'f' then
-        local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
-        local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
-
-        brush.color = {canvas:newImageData():getPixel(dx + camera.offset[1] + love.mouse.getX()/camera.zoom, dy + camera.offset[2] + love.mouse.getY()/camera.zoom)}
-        brush.color[4] = 1
+        love.graphics.captureScreenshot(function(imgd)
+            local r, g, b = imgd:getPixel(getMouseGlobal())
+            brush.color[1] = r
+            brush.color[2] = g
+            brush.color[3] = b
+            brush.color[4] = 1
+        end)
     end
 
     imgui.KeyPressed(k)
     if not imgui.GetWantCaptureKeyboard() then
-         
+
+    end
+end
+
+function love.keyreleased(k)
+    imgui.KeyReleased(k)
+    if not imgui.GetWantCaptureKeyboard() then
+
     end
 end
 
@@ -346,7 +486,7 @@ end
 function love.mousepressed(x, y, button)
     imgui.MousePressed(button)
     if not imgui.GetWantCaptureMouse() then
-         
+         registerDrawClick = registerDrawClick + 1
     end
 end
 
