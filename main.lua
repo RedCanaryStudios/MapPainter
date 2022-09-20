@@ -3,12 +3,12 @@ local nativefs = require("deps.nativefs")
 local ffi = require("ffi")
 
 local imgui
-local hover = false
 local hoverdb = 0
 
 local canvas
 local clock = 0
 local registerDrawClick = 0
+local registerDelClick = 0
 
 local fps = 0
 local fpslast = 0
@@ -16,14 +16,8 @@ local fpslast = 0
 local debug = {
     scale = 3;
     hoverdb = 0.22;
-    print = function()
-        return fps
-    end
+    print = nil;
 }
-
-local function isUI()
-    return (clock - hoverdb < debug.hoverdb)
-end
 
 local brush = {
     color = {1, 1, 1, 1};
@@ -41,7 +35,48 @@ local items = {
     stationary = {};
     moveable = {};
     pending = nil;
+    selected = {};
 }
+
+local mouseManager = {
+    doBrush = false;
+}
+
+mouseManager.release = function(self)
+    self.doBrush = not imgui.GetWantCaptureMouse()
+    if self:canBrush() then
+        love.mouse.setCursor(love.mouse.getSystemCursor("crosshair"))
+    end
+end
+
+mouseManager.beginUI = function(self)
+    self.doBrush = false
+    love.mouse.setCursor()
+end
+
+mouseManager.debounce = function(self)
+    self.doBrush = false
+    love.mouse.setCursor()
+end
+
+mouseManager.canBrush = function(self)
+    return self.doBrush and (#items.selected == 0)
+end
+
+local renderOnTop = {}
+
+renderOnTop.queue = {}
+
+renderOnTop.append = function(self, foo)
+    table.insert(self.queue, foo)
+end
+
+renderOnTop.draw = function(self)
+    for i = #self.queue, 1, -1 do
+        self.queue[i]()
+    end
+    renderOnTop.queue = {}
+end
 
 local function starPoints(a, r, ox, oy)
     local vertices = {}
@@ -58,26 +93,62 @@ local stationaryTemplates = {
     City = {
         Render = function(mydat, ofx, ofy)
             love.graphics.setColor(unpack(mydat.color))
-            love.graphics.polygon("fill", starPoints(3, mydat.size, mydat.x + ofx, mydat.y + ofy))
+            love.graphics.polygon("fill", starPoints(3, mydat.size, mydat.x + ofx, mydat.y))
         end;
     };
 
     Capital = {
         Render = function(mydat, ofx, ofy)
             love.graphics.setColor(unpack(mydat.color))
-            love.graphics.polygon("fill", starPoints(5, mydat.size, mydat.x + ofx, mydat.y + ofy))
+            love.graphics.polygon("fill", starPoints(5, mydat.size, mydat.x + ofx, mydat.y))
         end;
     };
 
     Dock = {
         Render = function(mydat, ofx, ofy)
             love.graphics.setColor(unpack(mydat.color))
-            love.graphics.polygon("fill", starPoints(4, mydat.size, mydat.x + ofx, mydat.y + ofy))
+            love.graphics.polygon("fill", starPoints(4, mydat.size, mydat.x + ofx, mydat.y))
         end;
     };
 }
 
-local stationaryMoveable = {}
+local moveableTemplates = {
+    Basic = {
+        Render = function(mydat, ofx, ofy, tc)
+            --[[if mydat.moveTo then
+                love.graphics.setColor(0, 1, 0, 0.75)
+                love.graphics.line(mydat.x + ofx, mydat.y + ofy, mydat.moveTo[1] + ofx, mydat.moveTo[2] + ofy)
+            end]]
+            if mydat.isSel then
+                love.graphics.setColor(0, 1, 0, 1)
+                love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 2)
+            end
+            love.graphics.setColor(0, 0, 0, 1)
+            love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 1.5)
+            love.graphics.setColor(unpack(mydat.color))
+            love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 1)
+        end;
+    };
+
+    Strong = {
+        Render = function(mydat, ofx, ofy)
+            --[[if mydat.moveTo then
+                love.graphics.setColor(0, 1, 0, 1)
+                love.graphics.line(mydat.x, mydat.y, mydat.moveTo[1], mydat.moveTo[2])
+            end]]
+            if mydat.isSel then
+                love.graphics.setColor(0, 1, 0, 1)
+                love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 2.5)
+            end
+            love.graphics.setColor(0, 0, 0, 1)
+            love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 2)
+            love.graphics.setColor(255/255, 215/255, 0, 1)
+            love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 1.5)
+            love.graphics.setColor(unpack(mydat.color))
+            love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 1)
+        end;
+    };
+}
 
 local overlay = love.graphics.newImage("resources/map.png")
 local canvas = love.graphics.newCanvas(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
@@ -92,6 +163,10 @@ end
 
 local function getMouseCanvas()
     return love.graphics.transformPoint(getMouseGlobal())
+end
+
+local function dist(x1, y1, x2, y2)
+    return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
 end
 
 local function shallowcopy(orig)
@@ -111,6 +186,13 @@ end
 local function savedata()
     local imgdata = canvas:newImageData():getString()
     nativefs.write("save/dat", binser.serialize(items, brush, camera, imgdata))
+end
+
+local function deselect()
+    for _, v in ipairs(items.selected) do
+        v.isSel = false
+    end
+    items.selected = {}
 end
 
 function love.run()
@@ -176,9 +258,10 @@ function love.load(args)
     imgui.GetStyle().GrabRounding = 4;
 
     local flags = {}
-    flags.fullscreentype = "desktop"
+    flags.fullscreentype = "exclusive"
     flags.fullscreen = true
-    love.window.setMode(100, 100, flags)
+    flags.msaa = 8
+    love.window.setMode(0, 0, flags)
 
     if not nativefs.getInfo("save") then
         nativefs.createDirectory("save")
@@ -189,17 +272,17 @@ function love.load(args)
     end
     local contents = nativefs.read("save/dat")
 
-    canvas:renderTo(function()
-        love.graphics.setColor(77/255, 140/255, 50/255)
-        love.graphics.rectangle("fill", 0, 0, overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
-    end)
-
     if contents ~= "" and args[1] ~= "-ns" then
         items, brush, camera, imgdata = binser.deserializeN(contents, 4)
         local loaded = love.image.newImageData(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale, "rgba8", imgdata)
         canvas:renderTo(function()
             local img = love.graphics.newImage(loaded)
             love.graphics.draw(img)
+        end)
+    else
+        canvas:renderTo(function()
+            love.graphics.setColor(77/255, 140/255, 50/255)
+            love.graphics.rectangle("fill", 0, 0, overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
         end)
     end
 end
@@ -260,7 +343,7 @@ local function SF()
     love.graphics.setShader()
 end
 
-local function doGraphics()
+local function doGraphics(first)
     local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
@@ -276,7 +359,7 @@ local function doGraphics()
 
     local mx, my = getMouseLocal()
 
-    if not isUI() then
+    if mouseManager:canBrush() then
         love.graphics.setColor(unpack(brush.color))
         love.graphics.circle("fill", mx, my, brush.size)
     end
@@ -290,53 +373,123 @@ local function doGraphics()
         stationaryTemplates[v.type].Render(v, ox, oy)
     end
 
-    if items.pending and registerDrawClick > 0 then
-        registerDrawClick = registerDrawClick - 1
-        hoverdb = clock
+    for _, v in ipairs(items.moveable) do
+        moveableTemplates[v.type].Render(v, ox, oy)
+    end
 
-        local dat = {
-            type = items.pending;
-            size = brush.structsize;
-            x = mx;
-            y = my;
-            color = shallowcopy(brush.color)
-        }
-        
-        table.insert(items.stationary, dat)
+    if items.pending and registerDrawClick > 0 and first then
+        local isStationary = stationaryTemplates[items.pending]
+
+        if isStationary then
+            local dat = {
+                type = items.pending;
+                size = brush.structsize;
+                x = mx % overlay:getWidth();
+                y = my;
+                color = shallowcopy(brush.color)
+            }
+            
+            table.insert(items.stationary, dat)
+        else
+            local dat = {
+                type = items.pending;
+                x = mx % overlay:getWidth();
+                y = my;
+                color = shallowcopy(brush.color);
+                isSel = false;
+            }
+            
+            table.insert(items.moveable, dat)
+        end
 
         if not love.keyboard.isDown("lctrl") then
             items.pending = nil
         end
-     end
+
+        mouseManager:debounce()
+    end
+
+    if registerDelClick > 0 and first then
+        local mx, my = mx % overlay:getWidth(), my % overlay:getWidth()
+        for i = #items.stationary, 1, -1 do
+            local itm = items.stationary[i]
+            if dist(mx, my, itm.x, itm.y) < brush.size then
+                table.remove(items.stationary, i)
+            end
+        end
+
+        for i = #items.moveable, 1, -1 do
+            local itm = items.moveable[i]
+            if dist(mx, my, itm.x, itm.y) < 2 then
+                table.remove(items.moveable, i)
+            end
+        end
+    end
 
     if items.pending then
-        local fakeDat = {
-            size = brush.structsize;
-            x = mx;
-            y = my;
-            color = brush.color;
-        }
-        stationaryTemplates[items.pending].Render(fakeDat, 0, 0)
+        local isStationary = stationaryTemplates[items.pending]
+        if isStationary then
+            local fakeDat = {
+                size = brush.structsize;
+                x = mx;
+                y = my;
+                color = brush.color;
+            }
+            stationaryTemplates[items.pending].Render(fakeDat, 0, 0)
+        else
+            local fakeDat = {
+                x = mx;
+                y = my;
+                color = brush.color;
+                isSel = false;
+            }
+            moveableTemplates[items.pending].Render(fakeDat, 0, 0)
+        end
+    end
+
+    if items.selected and first and love.keyboard.isDown('r') then
+        for i, v in ipairs(items.selected) do
+            v.moveTo = {((mx + 5000) % overlay:getWidth())-5000, my}
+        end
     end
 
     love.graphics.pop()
 
-    if love.mouse.isDown(1) and not isUI() and not items.pending then
+    if registerDrawClick > 0 then
+        local found = false
+        local mx, my = mx % overlay:getWidth(), my % overlay:getWidth()
+        for i = #items.moveable, 1, -1 do
+            local itm = items.moveable[i]
+            if dist(mx, my, itm.x, itm.y) < 2 then
+                itm.isSel = true
+                table.insert(items.selected, itm)
+                mouseManager:debounce()
+                found = true
+                break
+            end
+        end
+        if not found then
+            deselect()
+        end
+    end
+
+    if love.mouse.isDown(1) and mouseManager:canBrush() and not items.pending and first and (#items.selected == 0) then
         canvas:renderTo(function()
             love.graphics.setColor(unpack(brush.color))
-            love.graphics.circle("fill", (mx % overlay:getWidth())*debug.scale, my*debug.scale, brush.size*debug.scale)
+            love.graphics.circle("fill", (mx)*debug.scale, my*debug.scale, brush.size*debug.scale)
+            love.graphics.circle("fill", (mx - overlay:getWidth())*debug.scale, my*debug.scale, brush.size*debug.scale)
+            love.graphics.circle("fill", (mx + overlay:getWidth())*debug.scale, my*debug.scale, brush.size*debug.scale)
         end)
     end
 
-    if not isUI() and not items.pending then
-        love.graphics.setColor(unpack(brush.color))
+    if mouseManager:canBrush() and not items.pending then
+        love.graphics.setColor(brush.color[1]+0.03, brush.color[2]+0.03, brush.color[3]+0.03, 1)
         local mx, my = getMouseGlobal()
         love.graphics.circle("line", mx, my, brush.size*camera.zoom)
     end
 end
 
 function love.draw()
-    hover = false
     imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 120))
 
     if imgui.Begin("PaintBrush") then
@@ -356,7 +509,7 @@ function love.draw()
 
     imgui.End()
 
-    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 750))
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 500))
 
     if imgui.Begin("Placement") then
         if imgui.TreeNode_Str("Structures") then
@@ -381,25 +534,17 @@ function love.draw()
         end
 
         if imgui.TreeNode_Str("Units") then
-            if imgui.Button("Army") then
-
-            end
-
-            if imgui.Button("Heavy Army") then
-
-            end
-
-            if imgui.Button("Boat") then
-
+            for k in pairs(moveableTemplates) do
+                if imgui.Button("Create "..k) then
+                    if items.pending == k then
+                        items.pending = nil
+                    else
+                        items.pending = k
+                    end
+                end
             end
             imgui.TreePop()
         end
-
-        imgui.Spacing()
-
-        local db = ffi.new("float[1]", debug.hoverdb)
-        imgui.SliderFloat("Debounce", db, 0.05, 1)
-        debug.hoverdb = db[0]
     end
 
     imgui.End()
@@ -408,7 +553,7 @@ function love.draw()
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
     ox, oy = 0, 0
-    doGraphics()
+    doGraphics(true)
     if dx + camera.offset[1] > 0 then
         ox, oy = overlay:getWidth(), 0
         doGraphics()
@@ -422,13 +567,23 @@ function love.draw()
         love.graphics.print(debug.print())
     end
 
+    renderOnTop:draw()
+
+    love.graphics.setColor(1, 1, 1, 1)
+
     imgui.Render()
     imgui.RenderDrawLists()
 
-    hover = imgui.GetWantCaptureMouse()
+    if imgui.GetWantCaptureMouse() then
+        mouseManager:beginUI()
+    end
 
-    if hover == true then
-        hoverdb = clock
+    if registerDelClick > 0 then
+        registerDelClick = registerDelClick - 1
+    end
+
+    if registerDrawClick > 0 then
+        registerDrawClick = registerDrawClick - 1
     end
 end
 
@@ -486,12 +641,17 @@ end
 function love.mousepressed(x, y, button)
     imgui.MousePressed(button)
     if not imgui.GetWantCaptureMouse() then
-         registerDrawClick = registerDrawClick + 1
+        if button == 1 then
+            registerDrawClick = registerDrawClick + 1
+        elseif button == 2 then
+            registerDelClick = registerDelClick + 1
+        end
     end
 end
 
 function love.mousereleased(x, y, button)
     imgui.MouseReleased(button)
+    mouseManager:release()
     if not imgui.GetWantCaptureMouse() then
         
     end
