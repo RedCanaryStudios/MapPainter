@@ -36,6 +36,7 @@ local items = {
     moveable = {};
     pending = nil;
     selected = {};
+    speed = 1;
 }
 
 local mouseManager = {
@@ -78,6 +79,21 @@ renderOnTop.draw = function(self)
     renderOnTop.queue = {}
 end
 
+local function dist(x1, y1, x2, y2)
+    return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
+end
+
+local overlay = love.graphics.newImage("resources/map.png")
+local canvas = love.graphics.newCanvas(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
+
+local function genGrid(itms, space)
+    local sqrln = math.ceil(math.sqrt(itms))
+
+    return function(idx)
+        return (math.ceil(idx/sqrln) - sqrln/2)*space, ((idx % sqrln) + 1 - sqrln/2)*space
+    end
+end
+
 local function starPoints(a, r, ox, oy)
     local vertices = {}
 
@@ -114,11 +130,34 @@ local stationaryTemplates = {
 
 local moveableTemplates = {
     Basic = {
-        Render = function(mydat, ofx, ofy, tc)
-            --[[if mydat.moveTo then
-                love.graphics.setColor(0, 1, 0, 0.75)
-                love.graphics.line(mydat.x + ofx, mydat.y + ofy, mydat.moveTo[1] + ofx, mydat.moveTo[2] + ofy)
-            end]]
+        Render = function(mydat, ofx, ofy)
+            if mydat.moveTo then
+                renderOnTop:append(function()
+                    local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
+                    local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
+
+                    love.graphics.push()
+                    love.graphics.scale(camera.zoom)
+                    love.graphics.translate(-camera.offset[1] - dx, -camera.offset[2] - dy)
+
+                    love.graphics.setColor(0, 1, 0, 0.75)
+                
+                    local lines = {
+                        {math.abs(mydat.x - (mydat.moveTo[1] + overlay:getWidth())), mydat.moveTo[1] + overlay:getWidth(), "p"};
+                        {math.abs(mydat.x - (mydat.moveTo[1] - overlay:getWidth())), mydat.moveTo[1] - overlay:getWidth(), "-"};
+                        {math.abs(mydat.x - (mydat.moveTo[1])), mydat.moveTo[1], "n"};
+                    }
+
+                    table.sort(lines, function(a, b)
+                        return a[1] < b[1]
+                    end)
+
+                    love.graphics.line(mydat.x + ofx, mydat.y + ofy, lines[1][2] + ofx, mydat.moveTo[2] + ofy)
+                    love.graphics.setColor(0, 1, 0, 0.75)
+                    love.graphics.circle('line', lines[1][2] + ofx, mydat.moveTo[2] + ofy, 2)
+                    love.graphics.pop()
+                end)
+            end
             if mydat.isSel then
                 love.graphics.setColor(0, 1, 0, 1)
                 love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 2)
@@ -132,10 +171,33 @@ local moveableTemplates = {
 
     Strong = {
         Render = function(mydat, ofx, ofy)
-            --[[if mydat.moveTo then
-                love.graphics.setColor(0, 1, 0, 1)
-                love.graphics.line(mydat.x, mydat.y, mydat.moveTo[1], mydat.moveTo[2])
-            end]]
+            if mydat.moveTo then
+                renderOnTop:append(function()
+                    local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
+                    local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
+
+                    love.graphics.push()
+                    love.graphics.scale(camera.zoom)
+                    love.graphics.translate(-camera.offset[1] - dx, -camera.offset[2] - dy)
+
+                    love.graphics.setColor(0, 1, 0, 0.75)
+                
+                    local lines = {
+                        {math.abs(mydat.x - (mydat.moveTo[1] + overlay:getWidth())), mydat.moveTo[1] + overlay:getWidth(), "p"};
+                        {math.abs(mydat.x - (mydat.moveTo[1] - overlay:getWidth())), mydat.moveTo[1] - overlay:getWidth(), "-"};
+                        {math.abs(mydat.x - (mydat.moveTo[1])), mydat.moveTo[1], "n"};
+                    }
+
+                    table.sort(lines, function(a, b)
+                        return a[1] < b[1]
+                    end)
+
+                    love.graphics.line(mydat.x + ofx, mydat.y + ofy, lines[1][2] + ofx, mydat.moveTo[2] + ofy)
+                    love.graphics.setColor(0, 1, 0, 0.75)
+                    love.graphics.circle('line', lines[1][2] + ofx, mydat.moveTo[2] + ofy, 2.5)
+                    love.graphics.pop()
+                end)
+            end
             if mydat.isSel then
                 love.graphics.setColor(0, 1, 0, 1)
                 love.graphics.circle('fill', mydat.x + ofx, mydat.y + ofy, 2.5)
@@ -150,9 +212,6 @@ local moveableTemplates = {
     };
 }
 
-local overlay = love.graphics.newImage("resources/map.png")
-local canvas = love.graphics.newCanvas(overlay:getWidth()*debug.scale, overlay:getHeight()*debug.scale)
-
 local function getMouseGlobal()
     return love.mouse.getX(), love.mouse.getY()
 end
@@ -163,10 +222,6 @@ end
 
 local function getMouseCanvas()
     return love.graphics.transformPoint(getMouseGlobal())
-end
-
-local function dist(x1, y1, x2, y2)
-    return math.sqrt((x2 - x1)^2 + (y2 - y1)^2)
 end
 
 local function shallowcopy(orig)
@@ -227,16 +282,18 @@ function love.run()
 			love.graphics.origin()
 			love.graphics.clear(love.graphics.getBackgroundColor())
 
-			if love.draw then love.draw() end
+			if love.draw then love.draw(dt) end
 
 			love.graphics.present()
 		end
 
+        collectgarbage('collect')
 		if love.timer then love.timer.sleep(0.001) end
 	end
 end
 
 function love.load(args)
+    collectgarbage("stop")
     local lib_folder = string.format("libs/%s-%s", jit.os, jit.arch)
     assert(
         love.filesystem.getRealDirectory(lib_folder),
@@ -255,13 +312,7 @@ function love.load(args)
     imgui.Init()
     imgui.GetStyle().WindowRounding = 5
     imgui.GetStyle().FrameRounding = 4
-    imgui.GetStyle().GrabRounding = 4;
-
-    local flags = {}
-    flags.fullscreentype = "exclusive"
-    flags.fullscreen = true
-    flags.msaa = 8
-    love.window.setMode(0, 0, flags)
+    imgui.GetStyle().GrabRounding = 4
 
     if not nativefs.getInfo("save") then
         nativefs.createDirectory("save")
@@ -322,6 +373,30 @@ function love.update(dt)
 
     camera.offset[1] = camera.offset[1] % overlay:getWidth()
 
+    for _, v in ipairs(items.moveable) do
+        if v.moveTo then
+            if dist(v.x, v.y, v.moveTo[1], v.moveTo[2]) > 2 then
+                local lines = {
+                    {math.abs(v.x - (v.moveTo[1] + overlay:getWidth())), v.moveTo[1] + overlay:getWidth(), "p"};
+                    {math.abs(v.x - (v.moveTo[1] - overlay:getWidth())), v.moveTo[1] - overlay:getWidth(), "-"};
+                    {math.abs(v.x - (v.moveTo[1])), v.moveTo[1], "n"};
+                }
+
+                table.sort(lines, function(a, b)
+                    return a[1] < b[1]
+                end)
+
+                local dir = math.atan2(v.moveTo[2] - v.y, lines[1][2] - v.x)
+                v.x = (v.x + math.cos(dir)*dt*items.speed*100) % overlay:getWidth()
+                v.y = v.y + math.sin(dir)*dt*items.speed*100
+            else
+                v.x = v.moveTo[1]
+                v.y = v.moveTo[2]
+                v.moveTo = nil
+            end
+        end
+    end
+
     imgui.Update(dt)
     imgui.NewFrame()
 end
@@ -343,7 +418,7 @@ local function SF()
     love.graphics.setShader()
 end
 
-local function doGraphics(first)
+local function doGraphics(first, dt)
     local dx = (love.graphics.getWidth() / 2) - (love.graphics.getWidth() / 2) / camera.zoom
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
@@ -447,15 +522,17 @@ local function doGraphics(first)
         end
     end
 
-    if items.selected and first and love.keyboard.isDown('r') then
+    if #items.selected > 0 and first and love.keyboard.isDown('r') then
+        local f = genGrid(#items.selected, 5)
         for i, v in ipairs(items.selected) do
-            v.moveTo = {((mx + 5000) % overlay:getWidth())-5000, my}
+            local x, y = f(i)
+            v.moveTo = {mx + x, my + y}
         end
     end
 
     love.graphics.pop()
 
-    if registerDrawClick > 0 then
+    if registerDrawClick > 0 and first then
         local found = false
         local mx, my = mx % overlay:getWidth(), my % overlay:getWidth()
         for i = #items.moveable, 1, -1 do
@@ -489,7 +566,7 @@ local function doGraphics(first)
     end
 end
 
-function love.draw()
+function love.draw(dt)
     imgui.SetNextWindowSize(imgui.ImVec2_Float(280, 120))
 
     if imgui.Begin("PaintBrush") then
@@ -543,6 +620,13 @@ function love.draw()
                     end
                 end
             end
+
+            imgui.Spacing()
+
+            local speed = ffi.new("float[1]", items.speed)
+            imgui.SliderFloat("RED", speed, 0, 3)
+            items.speed = speed[0]
+
             imgui.TreePop()
         end
     end
@@ -553,13 +637,13 @@ function love.draw()
     local dy = (love.graphics.getHeight() / 2) - (love.graphics.getHeight() / 2) / camera.zoom
 
     ox, oy = 0, 0
-    doGraphics(true)
+    doGraphics(true, dt)
     if dx + camera.offset[1] > 0 then
         ox, oy = overlay:getWidth(), 0
-        doGraphics()
+        doGraphics(false, dt)
     else
         ox, oy = -overlay:getWidth(), 0
-        doGraphics()
+        doGraphics(false, dt)
     end
 
     if debug.print then
@@ -601,21 +685,21 @@ function love.wheelmoved(x, y)
 end
 
 function love.keypressed(k)
-    if k == 'escape' then
-        love.event.quit()
-    elseif k == 'f' then
-        love.graphics.captureScreenshot(function(imgd)
-            local r, g, b = imgd:getPixel(getMouseGlobal())
-            brush.color[1] = r
-            brush.color[2] = g
-            brush.color[3] = b
-            brush.color[4] = 1
-        end)
-    end
-
     imgui.KeyPressed(k)
     if not imgui.GetWantCaptureKeyboard() then
-
+        if k == 'escape' then
+            love.event.quit()
+        elseif k == 'f' then
+            love.graphics.captureScreenshot(function(imgd)
+                local r, g, b = imgd:getPixel(getMouseGlobal())
+                brush.color[1] = r
+                brush.color[2] = g
+                brush.color[3] = b
+                brush.color[4] = 1
+            end)
+        elseif k == 'p' then
+            savedata()
+        end
     end
 end
 
